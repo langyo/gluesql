@@ -2,12 +2,9 @@ use {
     super::{context::RowContext, evaluate::evaluate_stateless, filter::check_expr},
     crate::{
         ast::{
-            ToSql,
-            {
-                ColumnDef, ColumnUniqueOption, Dictionary, Expr, IndexItem, Join, Query, Select,
-                SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, ToSqlUnquoted,
-                Values,
-            },
+            ColumnDef, ColumnUniqueOption, Dictionary, Expr, IndexItem, Join, Query, Select,
+            SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, ToSql, ToSqlUnquoted,
+            Values,
         },
         data::{get_alias, get_index, Key, Row, Value},
         executor::{evaluate::evaluate, select::select},
@@ -386,10 +383,13 @@ pub async fn fetch_columns<T: GStore>(
 }
 
 #[async_recursion(?Send)]
-pub async fn fetch_relation_columns<T: GStore>(
+pub async fn fetch_relation_columns<T>(
     storage: &T,
     table_factor: &TableFactor,
-) -> Result<Option<Vec<String>>> {
+) -> Result<Option<Vec<String>>>
+where
+    T: GStore,
+{
     match table_factor {
         TableFactor::Table { name, alias, .. } => {
             let columns = fetch_columns(storage, name).await?;
