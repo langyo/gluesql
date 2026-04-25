@@ -3,6 +3,7 @@ use {
     crate::ast::ToSql,
     itertools::Itertools,
     serde::{Deserialize, Serialize},
+    std::hash::{Hash, Hasher},
     strum_macros::Display,
 };
 
@@ -26,7 +27,7 @@ pub enum Projection {
     SchemalessMap,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Select {
     pub distinct: bool,
     pub projection: Projection,
@@ -35,6 +36,36 @@ pub struct Select {
     pub selection: Option<Expr>,
     pub group_by: Vec<Expr>,
     pub having: Option<Expr>,
+    /// Planner-assigned aggregate slot table for this SELECT.
+    ///
+    /// This is execution metadata, not part of the SQL AST semantics.
+    /// It is ignored by equality, hashing, and serialization.
+    #[serde(default, skip)]
+    pub aggregate_slots: Option<Vec<super::Aggregate>>,
+}
+
+impl PartialEq for Select {
+    fn eq(&self, other: &Self) -> bool {
+        self.distinct == other.distinct
+            && self.projection == other.projection
+            && self.from == other.from
+            && self.selection == other.selection
+            && self.group_by == other.group_by
+            && self.having == other.having
+    }
+}
+
+impl Eq for Select {}
+
+impl Hash for Select {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.distinct.hash(state);
+        self.projection.hash(state);
+        self.from.hash(state);
+        self.selection.hash(state);
+        self.group_by.hash(state);
+        self.having.hash(state);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -254,6 +285,7 @@ impl Select {
             selection,
             group_by,
             having,
+            aggregate_slots: _,
         } = self;
         let projection = match projection {
             Projection::SelectItems(items) => {
@@ -626,21 +658,64 @@ mod tests {
     use {
         crate::{
             ast::{
-                BinaryOperator, Dictionary, Expr, Join, JoinConstraint, JoinExecutor, JoinOperator,
-                Literal, OrderByExpr, Projection, Query, Select, SelectItem, SetExpr, TableAlias,
-                TableFactor, TableWithJoins, ToSql, ToSqlUnquoted, Values,
+                Aggregate, BinaryOperator, CountArgExpr, Dictionary, Expr, Join, JoinConstraint,
+                JoinExecutor, JoinOperator, Literal, OrderByExpr, Projection, Query, Select,
+                SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, ToSql, ToSqlUnquoted,
+                Values,
             },
             parse_sql::parse_expr,
             translate::{NO_PARAMS, translate_expr},
         },
         bigdecimal::BigDecimal,
-        std::str::FromStr,
+        std::{
+            collections::{HashSet, hash_map::DefaultHasher},
+            hash::{Hash, Hasher},
+            str::FromStr,
+        },
     };
 
     fn expr(sql: &str) -> Expr {
         let parsed = parse_expr(sql).expect(sql);
 
         translate_expr(&parsed, NO_PARAMS).expect(sql)
+    }
+
+    #[test]
+    fn select_eq_and_hash_ignore_aggregate_slots() {
+        let hash = |select: &Select| {
+            let mut hasher = DefaultHasher::new();
+            select.hash(&mut hasher);
+            hasher.finish()
+        };
+        let left = Select {
+            distinct: false,
+            projection: Projection::SelectItems(vec![SelectItem::Wildcard]),
+            from: TableWithJoins {
+                relation: TableFactor::Table {
+                    name: "FOO".to_owned(),
+                    alias: None,
+                    index: None,
+                },
+                joins: Vec::new(),
+            },
+            selection: None,
+            group_by: Vec::new(),
+            having: None,
+            aggregate_slots: None,
+        };
+        let mut right = left.clone();
+        let mut aggregate = Aggregate::count(CountArgExpr::Wildcard, false);
+        aggregate.slot = Some(0);
+        right.aggregate_slots = Some(vec![aggregate]);
+
+        assert_eq!(left, right);
+        assert_eq!(hash(&left), hash(&right));
+
+        let mut set = HashSet::new();
+        set.insert(left);
+        set.insert(right);
+
+        assert_eq!(set.len(), 1);
     }
 
     #[test]
@@ -669,6 +744,7 @@ mod tests {
                 selection: None,
                 group_by: Vec::new(),
                 having: None,
+                aggregate_slots: None,
             })),
             order_by,
             limit: Some(Expr::Literal(Literal::Number(
@@ -707,6 +783,7 @@ mod tests {
                 selection: None,
                 group_by: Vec::new(),
                 having: None,
+                aggregate_slots: None,
             })),
             order_by,
             limit: Some(Expr::Literal(Literal::Number(
@@ -748,6 +825,7 @@ mod tests {
             selection: None,
             group_by: Vec::new(),
             having: None,
+            aggregate_slots: None,
         }))
         .to_sql();
         assert_eq!(actual, expected);
@@ -797,6 +875,7 @@ mod tests {
             selection: None,
             group_by: Vec::new(),
             having: None,
+            aggregate_slots: None,
         }))
         .to_sql_unquoted();
         assert_eq!(actual, expected);
@@ -857,6 +936,7 @@ mod tests {
                 op: BinaryOperator::Eq,
                 right: Box::new(Expr::Literal(Literal::QuotedString("glue".to_owned()))),
             }),
+            aggregate_slots: None,
         }
         .to_sql();
         assert_eq!(actual, expected);
@@ -880,6 +960,7 @@ mod tests {
             }),
             group_by: Vec::new(),
             having: None,
+            aggregate_slots: None,
         }
         .to_sql();
         assert_eq!(actual, expected);
@@ -909,6 +990,7 @@ mod tests {
                 op: BinaryOperator::Eq,
                 right: Box::new(Expr::Literal(Literal::QuotedString("glue".to_owned()))),
             }),
+            aggregate_slots: None,
         }
         .to_sql_unquoted();
         assert_eq!(actual, expected);
@@ -932,6 +1014,7 @@ mod tests {
             }),
             group_by: Vec::new(),
             having: None,
+            aggregate_slots: None,
         }
         .to_sql_unquoted();
         assert_eq!(actual, expected);
@@ -1038,6 +1121,7 @@ mod tests {
                     selection: None,
                     group_by: Vec::new(),
                     having: None,
+                    aggregate_slots: None,
                 })),
                 order_by: Vec::new(),
                 limit: None,
@@ -1105,6 +1189,7 @@ mod tests {
                     selection: None,
                     group_by: Vec::new(),
                     having: None,
+                    aggregate_slots: None,
                 })),
                 order_by: Vec::new(),
                 limit: None,
